@@ -331,13 +331,22 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     loop = asyncio.get_running_loop()
 
-    # State variables
-    history = deque(maxlen=7)
+    # ── Detection tuning constants ────────────────────────────────────
+    HISTORY_SIZE = 9                # sliding window for smoothing
+    MIN_CONFIDENCE = 0.40           # ignore predictions below this
+    HIGH_CONF_THRESHOLD = 0.85      # very confident → fewer frames needed
+    CONSEC_HIGH = 3                 # frames needed when confidence >= 85%
+    CONSEC_NORMAL = 5               # frames needed otherwise
+    NO_HAND_FRAMES_FOR_SPACE = 8    # hand-absent frames to trigger space
+
+    # ── State variables ───────────────────────────────────────────────
+    history = deque(maxlen=HISTORY_SIZE)       # (raw_label, confidence) tuples
     current_word = ""
     current_sentence = ""
     last_confirmed_letter = None
     consecutive_count = 0
-    REQUIRED_CONSECUTIVE = 5
+    no_hand_count = 0              # consecutive frames with no hand
+    hand_was_present = False       # whether we ever saw a hand
 
     last_word_for_suggestions = ""
     cached_suggestions = []
@@ -354,6 +363,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     history.clear()
                     last_confirmed_letter = None
                     consecutive_count = 0
+                    no_hand_count = 0
+                    hand_was_present = False
                     continue
                 elif data.startswith("COMMIT:"):
                     selected_word = data.split(":", 1)[1]
@@ -364,7 +375,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 else:
                     continue
-                
+
             if "action" in payload:
                 action = payload["action"]
                 if action == "CLEAR":
@@ -373,89 +384,163 @@ async def websocket_endpoint(websocket: WebSocket):
                     history.clear()
                     last_confirmed_letter = None
                     consecutive_count = 0
+                    no_hand_count = 0
+                    hand_was_present = False
                 elif action.startswith("COMMIT:"):
                     selected_word = action.split(":", 1)[1]
                     current_sentence += (" " + selected_word) if current_sentence else selected_word
                     current_word = ""
                     history.clear()
                     consecutive_count = 0
+                elif action == "BACKSPACE":
+                    if current_word:
+                        current_word = current_word[:-1]
+                    history.clear()
+                    consecutive_count = 0
                 continue
-                
-            if "landmarks" in payload:
-                landmarks = payload["landmarks"]
-                
-                # Check expected size
-                if len(landmarks) != 63:
-                    await websocket.send_json({"error": "Expected 63 landmarks"})
-                    continue
-                
-                feats = build_features(landmarks)
-                
-                # Run sync in threadpool
-                pred_idx  = await loop.run_in_executor(None, lambda: model.predict(feats)[0])
-                probs     = await loop.run_in_executor(None, lambda: model.predict_proba(feats)[0])
-                
-                raw_label  = str(le.inverse_transform([pred_idx])[0])
-                letter     = to_arabic(raw_label)
-                status = "success"
-                smoothed_letter = None
-                confirmed_letter = None
 
-                # Stable frame checking
-                if letter and status == "success":
-                    history.append(raw_label)  # store raw label for comparison
-                    smoothed_letter = Counter(history).most_common(1)[0][0]
-
-                    if smoothed_letter == last_confirmed_letter:
-                        consecutive_count += 1
-                    else:
-                        consecutive_count = 1
-                        last_confirmed_letter = smoothed_letter
-
-                    if consecutive_count == REQUIRED_CONSECUTIVE:
-                        confirmed_letter = to_arabic(smoothed_letter)
-                        if smoothed_letter in ["Space", "space"]:
-                            current_sentence += (" " + current_word) if current_sentence else current_word
-                            current_word = ""
-                        elif smoothed_letter in ["del", "nothing"]:
-                            pass 
-                        else:
-                            current_word += confirmed_letter
-                        
+            # ── Hand-absent detection (no landmarks → space) ──────────
+            if "landmarks" not in payload or payload.get("no_hand", False):
+                if hand_was_present:
+                    no_hand_count += 1
+                    if no_hand_count == NO_HAND_FRAMES_FOR_SPACE and current_word:
+                        # Hand removed → commit current word as space
+                        current_sentence += (" " + current_word) if current_sentence else current_word
+                        current_word = ""
                         history.clear()
+                        last_confirmed_letter = None
                         consecutive_count = 0
 
-                # Suggestion logic
-                if current_word and len(current_word) >= 2:
-                    if current_word != last_word_for_suggestions:
-                        cached_suggestions = get_suggestions(current_word)
-                        last_word_for_suggestions = current_word
-                    suggestions = cached_suggestions
+                        display_text = current_sentence
+                        if current_word:
+                            display_text += (" " + current_word) if display_text else current_word
+
+                        await websocket.send_json({
+                            "status": "no_hand_space",
+                            "raw_prediction": None,
+                            "confirmed_letter": " ",
+                            "current_word": current_word,
+                            "final_word": display_text,
+                            "suggestions": [],
+                            "letter": None,
+                            "confidence": 0.0,
+                            "top3": [],
+                            "hand_detected": False
+                        })
+                    elif no_hand_count > NO_HAND_FRAMES_FOR_SPACE:
+                        # Keep sending no-hand status without re-triggering space
+                        display_text = current_sentence
+                        if current_word:
+                            display_text += (" " + current_word) if display_text else current_word
+                        await websocket.send_json({
+                            "status": "no_hand",
+                            "raw_prediction": None,
+                            "confirmed_letter": None,
+                            "current_word": current_word,
+                            "final_word": display_text,
+                            "suggestions": [],
+                            "letter": None,
+                            "confidence": 0.0,
+                            "top3": [],
+                            "hand_detected": False
+                        })
+                continue
+
+            landmarks = payload["landmarks"]
+
+            # Check expected size
+            if len(landmarks) != 63:
+                await websocket.send_json({"error": "Expected 63 landmarks"})
+                continue
+
+            # Hand is present → reset no-hand counter
+            hand_was_present = True
+            no_hand_count = 0
+
+            feats = build_features(landmarks)
+
+            # Run sync in threadpool
+            pred_idx = await loop.run_in_executor(None, lambda: model.predict(feats)[0])
+            probs = await loop.run_in_executor(None, lambda: model.predict_proba(feats)[0])
+
+            raw_label = str(le.inverse_transform([pred_idx])[0])
+            confidence = float(probs[pred_idx])
+            letter = to_arabic(raw_label)
+            status = "success"
+            smoothed_letter = None
+            confirmed_letter = None
+
+            # ── Confidence-weighted smoothing ─────────────────────────
+            if confidence >= MIN_CONFIDENCE:
+                history.append((raw_label, confidence))
+
+                # Weighted voting: each vote is weighted by its confidence
+                vote_weights = {}
+                for lbl, conf in history:
+                    vote_weights[lbl] = vote_weights.get(lbl, 0.0) + conf
+                smoothed_letter = max(vote_weights, key=vote_weights.get)
+
+                # Adaptive consecutive count
+                if smoothed_letter == last_confirmed_letter:
+                    consecutive_count += 1
                 else:
-                    suggestions = []
-                    last_word_for_suggestions = ""
+                    consecutive_count = 1
+                    last_confirmed_letter = smoothed_letter
 
-                display_text = current_sentence
-                if current_word:
-                    display_text += (" " + current_word) if display_text else current_word
+                # Determine required frames based on confidence
+                avg_conf = vote_weights[smoothed_letter] / max(
+                    sum(1 for lbl, _ in history if lbl == smoothed_letter), 1
+                )
+                required = CONSEC_HIGH if avg_conf >= HIGH_CONF_THRESHOLD else CONSEC_NORMAL
 
-                top3_idx = np.argsort(probs)[::-1][:3]
-                top3 = [
-                    {"letter": to_arabic(str(le.inverse_transform([i])[0])), "confidence": float(round(probs[i], 4))}
-                    for i in top3_idx
-                ]
+                if consecutive_count >= required:
+                    confirmed_letter = to_arabic(smoothed_letter)
+                    if smoothed_letter in ["Space", "space"]:
+                        current_sentence += (" " + current_word) if current_sentence else current_word
+                        current_word = ""
+                    elif smoothed_letter in ["del", "nothing"]:
+                        pass
+                    else:
+                        current_word += confirmed_letter
 
-                await websocket.send_json({
-                    "status": status,
-                    "raw_prediction": letter,
-                    "confirmed_letter": confirmed_letter,
-                    "current_word": current_word,
-                    "final_word": display_text,
-                    "suggestions": suggestions,
-                    "letter": letter, 
-                    "confidence": float(round(probs[pred_idx], 4)), 
-                    "top3": top3
-                })
+                    history.clear()
+                    consecutive_count = 0
+            else:
+                # Low confidence → don't add to history, acts as noise filter
+                pass
+
+            # Suggestion logic
+            if current_word and len(current_word) >= 2:
+                if current_word != last_word_for_suggestions:
+                    cached_suggestions = get_suggestions(current_word)
+                    last_word_for_suggestions = current_word
+                suggestions = cached_suggestions
+            else:
+                suggestions = []
+                last_word_for_suggestions = ""
+
+            display_text = current_sentence
+            if current_word:
+                display_text += (" " + current_word) if display_text else current_word
+
+            top3_idx = np.argsort(probs)[::-1][:3]
+            top3 = [
+                {"letter": to_arabic(str(le.inverse_transform([i])[0])), "confidence": float(round(probs[i], 4))}
+                for i in top3_idx
+            ]
+
+            await websocket.send_json({
+                "status": status,
+                "raw_prediction": letter,
+                "confirmed_letter": confirmed_letter,
+                "current_word": current_word,
+                "final_word": display_text,
+                "suggestions": suggestions,
+                "letter": letter,
+                "confidence": float(round(confidence, 4)),
+                "top3": top3,
+                "hand_detected": True
+            })
 
     except WebSocketDisconnect:
         print("Frontend WebSocket client disconnected")
