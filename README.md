@@ -1,4 +1,4 @@
-<h1 align="center">🌍 Arabic Sign Language (ArSL) Recognition API</h1>
+<h1 align="center"> Arabic Sign Language (ArSL) Recognition API</h1>
 
 <div align="center">
 
@@ -13,20 +13,20 @@
 
 ---
 
-## 📖 Overview
+##  Overview
 
 The **ArSL API** is a dedicated backend service designed to recognize and classify **Arabic Sign Language (ArSL)** gestures. Unlike the ASL version which uses PyTorch GCNs, this service utilizes a highly optimized **Random Forest Model** (`arsl_rf_model.joblib`) trained on MediaPipe hand landmarks to predict Arabic letters in real-time.
 
-### ✨ Key Highlights
+###  Key Highlights
 
-- 🎯 **High Accuracy Classification:** Uses a trained Random Forest Classifier tailored for the complex gestures of the Arabic alphabet.
-- ⚡ **Real-time Inference:** Built with FastAPI to handle high-frequency incoming coordinate streams.
-- 🏷️ **Label Encoding:** Custom `arsl_label_encoder.joblib` to map model predictions back to Arabic Unicode characters.
-- 🐳 **Docker Support:** Ready to be deployed instantly to cloud environments via Docker.
+-  **High Accuracy Classification:** Uses a trained Random Forest Classifier tailored for the complex gestures of the Arabic alphabet.
+-  **Real-time Inference:** Built with FastAPI to handle high-frequency incoming coordinate streams.
+-  **Label Encoding:** Custom `arsl_label_encoder.joblib` to map model predictions back to Arabic Unicode characters.
+-  **Docker Support:** Ready to be deployed instantly to cloud environments via Docker.
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### Prerequisites
 
@@ -57,7 +57,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 🧠 Model Details
+##  Model Details
 
 - **Model:** Random Forest Classifier (`sklearn.ensemble.RandomForestClassifier`)
 - **Input:** 21 3D hand landmarks (X, Y, Z coordinates) extracted via MediaPipe
@@ -66,7 +66,14 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 👨‍💻 Developer
+##  License
 
-**Amr A. El-Mokadam**  
-*Graduation Project — Suez Canal University (Class of 2026)*
+Copyright © 2026 **Amr Ahmed**. All Rights Reserved.
+
+---
+
+<div align="center">
+
+Made with ❤️ as a graduation project · Suez Canal University 2026
+
+If you find this useful, please consider giving it a star!
